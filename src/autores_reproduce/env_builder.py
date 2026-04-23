@@ -62,15 +62,17 @@ class EnvBuilder:
 
         # Install dependencies
         python_path = venv_path / "bin" / "python"
-        pip_path = venv_path / "bin" / "pip"
+
+        # Detect whether to use `uv pip` or plain `pip`
+        self._use_uv_pip = self._has_uv()
 
         try:
-            self._install_dependencies(pip_path, deps, code_path)
+            self._install_dependencies(python_path, deps, code_path)
         except Exception as e:
             # Try minimal install as fallback
             self._log(f"Full install failed: {e}. Trying minimal install...")
             try:
-                self._install_minimal(pip_path, framework)
+                self._install_minimal(python_path, framework)
             except Exception as e2:
                 return {
                     "success": False,
@@ -271,20 +273,44 @@ class EnvBuilder:
             raise RuntimeError(f"venv creation failed: {result.stderr}")
         self._log("Created venv with stdlib venv")
 
+    @staticmethod
+    def _has_uv() -> bool:
+        """Check if `uv` is available on PATH."""
+        try:
+            subprocess.run(
+                ["uv", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return True
+        except FileNotFoundError:
+            return False
+
+    def _pip_install_cmd(self, python_path: Path) -> list[str]:
+        """Return the base install command, preferring `uv pip` over plain pip."""
+        if self._use_uv_pip:
+            return ["uv", "pip", "install", "--python", str(python_path)]
+        else:
+            pip_path = python_path.parent / "pip"
+            return [str(pip_path), "install"]
+
     def _install_dependencies(
-        self, pip_path: Path, deps: list[str], code_path: Path
+        self, python_path: Path, deps: list[str], code_path: Path
     ):
         """Install dependencies into the virtual environment."""
         if not deps:
             self._log("No dependencies to install")
             return
 
+        base_cmd = self._pip_install_cmd(python_path)
+
         # First try installing from requirements.txt if it exists
         req_file = code_path / "requirements.txt"
         if req_file.exists():
-            self._log("Installing from requirements.txt")
+            self._log(f"Installing from requirements.txt (using {'uv pip' if self._use_uv_pip else 'pip'})")
             result = subprocess.run(
-                [str(pip_path), "install", "-r", str(req_file)],
+                base_cmd + ["-r", str(req_file)],
                 capture_output=True,
                 text=True,
                 timeout=600,
@@ -298,7 +324,7 @@ class EnvBuilder:
         failed = []
         for dep in deps:
             result = subprocess.run(
-                [str(pip_path), "install", dep],
+                base_cmd + [dep],
                 capture_output=True,
                 text=True,
                 timeout=300,
@@ -312,7 +338,7 @@ class EnvBuilder:
         elif failed:
             self._log(f"Warning: {len(failed)} deps failed to install: {failed}")
 
-    def _install_minimal(self, pip_path: Path, framework: str):
+    def _install_minimal(self, python_path: Path, framework: str):
         """Install minimal dependencies based on detected framework."""
         minimal_deps = {
             "pytorch": ["torch", "torchvision", "numpy"],
@@ -324,8 +350,9 @@ class EnvBuilder:
         deps = minimal_deps.get(framework, ["numpy"])
         self._log(f"Installing minimal deps: {deps}")
 
+        base_cmd = self._pip_install_cmd(python_path)
         result = subprocess.run(
-            [str(pip_path), "install"] + deps,
+            base_cmd + deps,
             capture_output=True,
             text=True,
             timeout=600,

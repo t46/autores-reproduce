@@ -32,7 +32,7 @@ class ReproductionPipeline:
         verbose: bool = False,
     ):
         self.arxiv_url = arxiv_url
-        self.output_dir = output_dir
+        self.output_dir = output_dir.resolve()
         self.timeout = timeout
         self.use_gpu = use_gpu
         self.verbose = verbose
