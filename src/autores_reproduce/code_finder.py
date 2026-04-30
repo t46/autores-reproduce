@@ -40,32 +40,39 @@ class CodeFinder:
         """
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: Check for code references in paper
-        code_refs = paper_info.get("code_references", [])
-        if code_refs:
-            self._log(f"Found {len(code_refs)} code references in paper")
-            for ref in code_refs:
-                result = self._try_clone_repo(ref)
-                if result:
-                    return {
-                        "success": True,
-                        "source": "official",
-                        "message": f"Cloned official repository: {ref}",
-                        "path": result,
-                        "repo_url": ref,
-                    }
+        # 2026-04-30: ara-fixes / rubric-aware mode では prompt 介入の効果を測りたいので、
+        # 常に generation path を通す (official repo を取りに行かない)。
+        # default mode では従来通り official > github > generation の順。
+        skip_repo_lookup = prompt_mode in ("ara-fixes", "rubric-aware")
+        if skip_repo_lookup:
+            self._log(f"prompt_mode={prompt_mode}: skipping repo lookup, going straight to Claude generation")
+        else:
+            # Step 1: Check for code references in paper
+            code_refs = paper_info.get("code_references", [])
+            if code_refs:
+                self._log(f"Found {len(code_refs)} code references in paper")
+                for ref in code_refs:
+                    result = self._try_clone_repo(ref)
+                    if result:
+                        return {
+                            "success": True,
+                            "source": "official",
+                            "message": f"Cloned official repository: {ref}",
+                            "path": result,
+                            "repo_url": ref,
+                        }
 
-        # Step 2: Search GitHub
-        self._log("Searching GitHub for code...")
-        github_result = self._search_github(paper_info)
-        if github_result:
-            return {
-                "success": True,
-                "source": "github_search",
-                "message": f"Found code via GitHub search: {github_result['url']}",
-                "path": github_result["path"],
-                "repo_url": github_result["url"],
-            }
+            # Step 2: Search GitHub
+            self._log("Searching GitHub for code...")
+            github_result = self._search_github(paper_info)
+            if github_result:
+                return {
+                    "success": True,
+                    "source": "github_search",
+                    "message": f"Found code via GitHub search: {github_result['url']}",
+                    "path": github_result["path"],
+                    "repo_url": github_result["url"],
+                }
 
         # Step 3: Generate code with Claude
         self._log(f"No official code found. Generating implementation with Claude (prompt_mode={prompt_mode})...")
