@@ -30,11 +30,15 @@ class PaperFetcher:
         self.verbose = verbose
         self.client = Anthropic()
 
-    def fetch(self, arxiv_url: str) -> dict[str, Any]:
+    def fetch(self, arxiv_url: str, paper_cache_dir: Path | str | None = None) -> dict[str, Any]:
         """Fetch paper metadata, PDF, and extract key information.
 
         Args:
             arxiv_url: URL to the arXiv paper (abs or pdf link).
+            paper_cache_dir: Optional path to a paperbench-data style directory containing
+                paper.pdf + paper.md (+ optional config.yaml). When provided, arXiv fetch is
+                bypassed and metadata + PDF text are read locally. This avoids 429 rate limits
+                during batch experiments. Added 2026-04-30 for pipeline-rethink batch.
 
         Returns:
             Dict with paper metadata, extracted claims, and analysis.
@@ -51,34 +55,42 @@ class PaperFetcher:
 
         self._log(f"Fetching paper with arXiv ID: {arxiv_id}")
 
-        # Fetch metadata via arXiv API
-        try:
-            metadata = self._fetch_metadata(arxiv_id)
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to fetch arXiv metadata: {e}",
-            }
+        if paper_cache_dir is not None:
+            # Cached path: read locally, no arXiv API call
+            try:
+                metadata, pdf_path, paper_text = self._fetch_from_cache(arxiv_id, Path(paper_cache_dir))
+                self._log(f"Loaded paper from cache: {paper_cache_dir}")
+            except Exception as e:
+                return {"success": False, "error": f"Failed to load cached paper: {e}"}
+        else:
+            # Fetch metadata via arXiv API
+            try:
+                metadata = self._fetch_metadata(arxiv_id)
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to fetch arXiv metadata: {e}",
+                }
 
-        # Download PDF
-        try:
-            pdf_path = self._download_pdf(metadata)
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to download PDF: {e}",
-                **metadata,
-            }
+            # Download PDF
+            try:
+                pdf_path = self._download_pdf(metadata)
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to download PDF: {e}",
+                    **metadata,
+                }
 
-        # Extract text from PDF
-        try:
-            paper_text = self._extract_pdf_text(pdf_path)
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to extract PDF text: {e}",
-                **metadata,
-            }
+            # Extract text from PDF
+            try:
+                paper_text = self._extract_pdf_text(pdf_path)
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to extract PDF text: {e}",
+                    **metadata,
+                }
 
         # Use Claude to analyze the paper
         try:
@@ -99,6 +111,50 @@ class PaperFetcher:
             # 2026-04-30: 50000 -> 200000 に拡張。Claude Sonnet 4 の context は十分。
             "paper_text": paper_text[:200000],
         }
+
+    def _fetch_from_cache(self, arxiv_id: str, cache_dir: Path) -> tuple[dict, Path, str]:
+        """Load paper.{pdf,md} from a paperbench-data style cache directory.
+
+        Returns (metadata, pdf_path, paper_text) tuple. Bypasses arXiv API + download.
+        """
+        if not cache_dir.is_dir():
+            raise FileNotFoundError(f"cache_dir not found: {cache_dir}")
+        pdf_src = cache_dir / "paper.pdf"
+        md_src = cache_dir / "paper.md"
+        if not pdf_src.exists():
+            raise FileNotFoundError(f"paper.pdf missing in {cache_dir}")
+        # Copy PDF into output_dir so downstream paths look the same as the online flow
+        pdf_dest = self.output_dir / "paper.pdf"
+        pdf_dest.write_bytes(pdf_src.read_bytes())
+
+        # Title / abstract: prefer paper.md (first non-empty line as title, optional Abstract section)
+        title = arxiv_id
+        abstract = ""
+        if md_src.exists():
+            md_text = md_src.read_text(errors="replace")
+            for line in md_text.splitlines():
+                line = line.strip()
+                if line:
+                    # Strip leading "# " markdown
+                    title = line.lstrip("#").strip() or arxiv_id
+                    break
+            # Best-effort abstract extraction
+            m = re.search(r"(?:^|\n)#+\s*Abstract\s*\n+([^\n#]+(?:\n[^\n#]+)*)", md_text, re.IGNORECASE)
+            if m:
+                abstract = m.group(1).strip()[:2000]
+
+        metadata = {
+            "arxiv_id": arxiv_id,
+            "title": title,
+            "abstract": abstract,
+            "authors": [],
+            "published": "",
+            "pdf_url": str(pdf_src),
+        }
+
+        # Use the existing pdfplumber-based extractor on the cached PDF
+        paper_text = self._extract_pdf_text(pdf_dest)
+        return metadata, pdf_dest, paper_text
 
     def _extract_arxiv_id(self, url: str) -> str | None:
         """Extract arXiv ID from various URL formats.

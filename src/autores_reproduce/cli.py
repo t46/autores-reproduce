@@ -54,8 +54,14 @@ from .pipeline import ReproductionPipeline
     default=None,
     help="Path to PaperBench rubric.json. Required when --prompt-mode=rubric-aware.",
 )
+@click.option(
+    "--paper-cache-dir",
+    type=click.Path(exists=True),
+    default=None,
+    help="Optional paperbench-data style dir (paper.pdf + paper.md). Bypasses arXiv fetch to avoid 429s.",
+)
 def main(arxiv_url: str, output_dir: str, timeout: int, gpu: bool, verbose: bool,
-         prompt_mode: str, rubric_path: str | None):
+         prompt_mode: str, rubric_path: str | None, paper_cache_dir: str | None):
     """Reproduce an ML paper from its arXiv URL.
 
     Takes an arXiv URL and attempts to reproduce the paper's experimental
@@ -85,6 +91,7 @@ def main(arxiv_url: str, output_dir: str, timeout: int, gpu: bool, verbose: bool
         verbose=verbose,
         prompt_mode=prompt_mode,
         rubric_path=rubric_path,
+        paper_cache_dir=paper_cache_dir,
     )
 
     try:

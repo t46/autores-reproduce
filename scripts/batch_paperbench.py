@@ -123,6 +123,10 @@ def run_pipeline_for_paper(
         "--timeout", "60",  # execution が長く詰まらないように短め
         "--prompt-mode", prompt_mode,
     ]
+    # 2026-04-30: avoid arXiv 429 by always preferring local paperbench-data cache
+    paper_cache = PAPERBENCH_DATA / paper_id
+    if (paper_cache / "paper.pdf").exists():
+        cmd.extend(["--paper-cache-dir", str(paper_cache)])
     if variant == "rubric-aware":
         rubric_path = PAPERBENCH_DATA / paper_id / "rubric.json"
         if rubric_path.exists():
