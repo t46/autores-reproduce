@@ -13,6 +13,14 @@ import arxiv
 from anthropic import Anthropic
 from PyPDF2 import PdfReader
 
+# 2026-04-30: pdfplumber を優先 extractor に追加。table 抽出が PyPDF2 より遥かに強い。
+# import 失敗時は PyPDF2 fallback で動くように構造を組む。
+try:
+    import pdfplumber  # type: ignore
+    _HAS_PDFPLUMBER = True
+except ImportError:
+    _HAS_PDFPLUMBER = False
+
 
 class PaperFetcher:
     """Fetches and parses ML papers from arXiv."""
@@ -88,7 +96,8 @@ class PaperFetcher:
             **metadata,
             **analysis,
             "pdf_path": str(pdf_path),
-            "paper_text": paper_text[:50000],  # Truncate for report size
+            # 2026-04-30: 50000 -> 200000 に拡張。Claude Sonnet 4 の context は十分。
+            "paper_text": paper_text[:200000],
         }
 
     def _extract_arxiv_id(self, url: str) -> str | None:
@@ -148,14 +157,72 @@ class PaperFetcher:
         return pdf_path
 
     def _extract_pdf_text(self, pdf_path: Path) -> str:
-        """Extract text content from PDF."""
+        """Extract text content from PDF.
+
+        2026-04-30: pdfplumber 優先。pdfplumber は table 抽出が強く、
+        論文 Table 1 / Table 2 の数値（FID 1.13 等）を markdown 化して
+        取り出せる。失敗時は PyPDF2 にフォールバック。
+        """
+        if _HAS_PDFPLUMBER:
+            try:
+                return self._extract_with_pdfplumber(pdf_path)
+            except Exception as e:
+                self._log(f"pdfplumber 抽出失敗、PyPDF2 にフォールバック: {e}")
+        return self._extract_with_pypdf2(pdf_path)
+
+    def _extract_with_pdfplumber(self, pdf_path: Path) -> str:
+        """Extract using pdfplumber, including table extraction as markdown."""
+        text_parts: list[str] = []
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                # 1) Plain text
+                page_text = page.extract_text() or ""
+                if page_text:
+                    text_parts.append(page_text)
+                # 2) Tables — markdown 化して text に追加
+                try:
+                    tables = page.extract_tables() or []
+                except Exception:
+                    tables = []
+                for tbl_idx, tbl in enumerate(tables, 1):
+                    if not tbl or not any(any(cell for cell in row if cell) for row in tbl):
+                        continue
+                    md = self._table_to_markdown(tbl)
+                    if md:
+                        text_parts.append(
+                            f"\n[Table extracted from page {page_num} (table {tbl_idx})]\n{md}\n"
+                        )
+        return "\n".join(text_parts)
+
+    def _extract_with_pypdf2(self, pdf_path: Path) -> str:
+        """Fallback: PyPDF2 のみ（table 抽出は不可）。"""
         reader = PdfReader(str(pdf_path))
-        text_parts = []
+        text_parts: list[str] = []
         for page in reader.pages:
             text = page.extract_text()
             if text:
                 text_parts.append(text)
         return "\n".join(text_parts)
+
+    @staticmethod
+    def _table_to_markdown(table: list[list[str | None]]) -> str:
+        """Convert a 2D table (list of rows) to a markdown table string."""
+        if not table:
+            return ""
+        # Normalize: replace None with empty, strip
+        rows = [[(cell or "").strip().replace("\n", " ") for cell in row] for row in table]
+        # Drop fully empty rows
+        rows = [r for r in rows if any(c for c in r)]
+        if not rows:
+            return ""
+        # Use widest row as column count
+        ncol = max(len(r) for r in rows)
+        rows = [r + [""] * (ncol - len(r)) for r in rows]
+        # Build markdown
+        header = "| " + " | ".join(rows[0]) + " |"
+        sep = "| " + " | ".join(["---"] * ncol) + " |"
+        body = ["| " + " | ".join(r) + " |" for r in rows[1:]]
+        return "\n".join([header, sep] + body)
 
     def _analyze_paper(self, paper_text: str, metadata: dict) -> dict[str, Any]:
         """Use Claude to extract key experimental information from the paper.
@@ -168,7 +235,8 @@ class PaperFetcher:
             - Reported metrics
         """
         # Truncate paper text to fit context
-        truncated_text = paper_text[:80000]
+        # 2026-04-30: 80000 -> 160000 に拡張（Claude Sonnet 4 の context window で十分扱える）
+        truncated_text = paper_text[:160000]
 
         prompt = f"""Analyze this ML paper and extract the following information in a structured format.
 

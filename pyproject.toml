@@ -10,6 +10,7 @@ dependencies = [
     "click>=8.1.0",
     "requests>=2.31.0",
     "PyPDF2>=3.0.0",
+    "pdfplumber>=0.11.9",
 ]
 
 [project.scripts]

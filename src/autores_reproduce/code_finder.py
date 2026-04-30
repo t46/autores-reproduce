@@ -233,7 +233,7 @@ for reproducibility - the goal is to verify the paper's main claims."""
         try:
             response = self.client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=8192,
+                max_tokens=16384,  # 2026-04-30: 8192 -> 16384 (cut-off 緩和)
                 messages=[{"role": "user", "content": prompt}],
             )
             response_text = response.content[0].text

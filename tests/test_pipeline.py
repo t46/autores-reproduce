@@ -219,8 +219,9 @@ class TestVerifier:
             {"status": "untested"},
         ]
         score = verifier._calculate_score(claims)
-        # (2 + 0.5*1) / 4 = 2.5/4 = 0.625
-        assert abs(score - 0.625) < 0.001
+        # 2026-04-30: untested の重みを 0.5 -> 0.25 に変更
+        # (2 + 0.25*1) / 4 = 2.25/4 = 0.5625
+        assert abs(score - 0.5625) < 0.001
 
     def test_calculate_score_all_verified(self):
         verifier = Verifier()
