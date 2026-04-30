@@ -89,10 +89,25 @@ def run_pipeline_for_paper(
     実行が失敗しても Stage 1/2/Code Generation は完走するので、その code を
     PaperBench evaluator にかける。
     """
+    # Track A/B (2026-04-30): 4 variants
+    # - baseline: original main, default prompt
+    # - improved: 4 strengthening fixes branch, default prompt
+    # - ara-fixes: pipeline-rethink branch (=improved + 3 ARA fixes), prompt_mode=ara-fixes
+    # - rubric-aware: same branch, prompt_mode=rubric-aware (rubric leaf checklist injected)
     if variant == "baseline":
         repro_dir = REPRODUCE_DIR_BASELINE
-    else:
+        prompt_mode = "default"
+    elif variant == "improved":
         repro_dir = REPRODUCE_DIR_IMPROVED
+        prompt_mode = "default"
+    elif variant == "ara-fixes":
+        repro_dir = REPRODUCE_DIR_IMPROVED
+        prompt_mode = "ara-fixes"
+    elif variant == "rubric-aware":
+        repro_dir = REPRODUCE_DIR_IMPROVED
+        prompt_mode = "rubric-aware"
+    else:
+        return {"success": False, "error": f"unknown variant: {variant}"}
 
     out_dir.mkdir(parents=True, exist_ok=True)
     pipeline_out = out_dir / "pipeline_output"
@@ -106,7 +121,16 @@ def run_pipeline_for_paper(
         "--output-dir", str(pipeline_out),
         "--no-gpu",
         "--timeout", "60",  # execution が長く詰まらないように短め
+        "--prompt-mode", prompt_mode,
     ]
+    if variant == "rubric-aware":
+        rubric_path = PAPERBENCH_DATA / paper_id / "rubric.json"
+        if rubric_path.exists():
+            cmd.extend(["--rubric-path", str(rubric_path)])
+        else:
+            log(f"  [{paper_id}/{variant}] WARN: rubric not found at {rubric_path}, falling back to ara-fixes mode")
+            # downgrade silently to ara-fixes if rubric is missing
+            cmd[cmd.index("--prompt-mode") + 1] = "ara-fixes"
 
     log(f"  [{paper_id}/{variant}] running pipeline ({arxiv_id})...")
     try:
@@ -218,6 +242,7 @@ def process_paper_variant(paper_id: str, arxiv_id: str, variant: str) -> dict:
     }
 
     repro_dir = REPRODUCE_DIR_BASELINE if variant == "baseline" else REPRODUCE_DIR_IMPROVED
+    # ara-fixes / rubric-aware も improved branch (= pipeline-rethink branch in this run) を使う
 
     # Step 1: pipeline
     pipe_result = run_pipeline_for_paper(paper_id, arxiv_id, variant, out_dir)

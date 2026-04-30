@@ -60,14 +60,50 @@ def get_weighted_tree(node: dict, category_filter: str | None = None) -> list[di
     return _collect(node)
 
 
+SKIP_DIRS = {".git", "venv", ".venv", "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", "dist", "build", ".tox", ".eggs"}
+MAX_FILE_BYTES = 100 * 1024  # 100 KB
+MAX_TOTAL_CHARS = 80_000
+
+
 def load_submission_code(submission_dir: str) -> str:
-    """Load all code files from the submission directory."""
-    code_parts = []
+    """Load all code files from the submission directory recursively.
+
+    ARA-a C-008 fix (2026-04-30): glob -> rglob so submission/<subdir>/*.py is included.
+    Skips .git / venv / __pycache__ etc. Truncates at MAX_TOTAL_CHARS to avoid overflowing judge.
+    """
+    code_parts: list[str] = []
     submission_path = Path(submission_dir)
+    seen_paths: set[Path] = set()
+    total_chars = 0
 
     for ext in ["*.py", "*.txt", "*.yaml", "*.yml", "*.toml", "*.cfg", "*.sh"]:
-        for file in sorted(submission_path.glob(ext)):
-            code_parts.append(f"=== {file.name} ===\n{file.read_text()}\n")
+        for file in sorted(submission_path.rglob(ext)):
+            if file in seen_paths:
+                continue
+            seen_paths.add(file)
+            # Skip if any parent directory is in SKIP_DIRS
+            if any(part in SKIP_DIRS for part in file.relative_to(submission_path).parts):
+                continue
+            try:
+                size = file.stat().st_size
+            except OSError:
+                continue
+            if size > MAX_FILE_BYTES:
+                continue
+            try:
+                content = file.read_text(errors="replace")
+            except OSError:
+                continue
+            rel = file.relative_to(submission_path)
+            chunk = f"=== {rel} ===\n{content}\n"
+            if total_chars + len(chunk) > MAX_TOTAL_CHARS:
+                code_parts.append(f"\n[truncated: {MAX_TOTAL_CHARS} char limit reached, remaining files skipped]\n")
+                break
+            code_parts.append(chunk)
+            total_chars += len(chunk)
+        else:
+            continue
+        break
 
     return "\n".join(code_parts)
 
@@ -162,7 +198,16 @@ def main():
     parser.add_argument("--output", required=True, help="Path to write evaluation results")
     parser.add_argument("--model", default="claude-sonnet-4-20250514", help="Model to use as judge")
     parser.add_argument("--max-nodes", type=int, default=None, help="Max leaf nodes to evaluate (for testing)")
+    parser.add_argument("--paper-id", default=None, help="Paper id for output metadata (auto-detect from rubric path if omitted)")
     args = parser.parse_args()
+    # ARA-a C-010 fix: derive paper_id from rubric path so it isn't hardcoded
+    if args.paper_id is None:
+        rubric_path = Path(args.rubric)
+        # paperbench-data/.../papers/<paper-id>/rubric.json
+        if rubric_path.parent.name and rubric_path.parent.parent.name == "papers":
+            args.paper_id = rubric_path.parent.name
+        else:
+            args.paper_id = rubric_path.parent.name or "unknown"
 
     # Load data
     rubric = load_rubric(args.rubric)
@@ -217,7 +262,7 @@ def main():
     # Compile results
     results = {
         "mode": args.mode,
-        "paper_id": "stochastic-interpolants",
+        "paper_id": args.paper_id,
         "submission_path": args.submission,
         "model_judge": args.model,
         "num_nodes_evaluated": len(scored_nodes),

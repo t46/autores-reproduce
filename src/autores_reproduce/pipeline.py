@@ -30,12 +30,17 @@ class ReproductionPipeline:
         timeout: int = 3600,
         use_gpu: bool = True,
         verbose: bool = False,
+        prompt_mode: str = "default",
+        rubric_path: Path | str | None = None,
     ):
         self.arxiv_url = arxiv_url
         self.output_dir = output_dir.resolve()
         self.timeout = timeout
         self.use_gpu = use_gpu
         self.verbose = verbose
+        # Track A.3 / B.1 (2026-04-30): "default" | "ara-fixes" | "rubric-aware"
+        self.prompt_mode = prompt_mode
+        self.rubric_path = rubric_path
 
         self.stages: list[dict[str, Any]] = []
         self.paper_info: dict[str, Any] = {}
@@ -174,7 +179,11 @@ class ReproductionPipeline:
     def _find_code(self) -> dict[str, Any]:
         """Stage 2: Find or generate code."""
         finder = CodeFinder(self.output_dir / "code", verbose=self.verbose)
-        return finder.find(self.paper_info)
+        return finder.find(
+            self.paper_info,
+            rubric_path=self.rubric_path,
+            prompt_mode=self.prompt_mode,
+        )
 
     def _build_env(self) -> dict[str, Any]:
         """Stage 3: Build execution environment."""

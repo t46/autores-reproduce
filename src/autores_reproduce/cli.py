@@ -42,7 +42,20 @@ from .pipeline import ReproductionPipeline
     default=False,
     help="Enable verbose logging output.",
 )
-def main(arxiv_url: str, output_dir: str, timeout: int, gpu: bool, verbose: bool):
+@click.option(
+    "--prompt-mode",
+    type=click.Choice(["default", "ara-fixes", "rubric-aware"]),
+    default="default",
+    help="Stage 2 prompt mode. 'default'=legacy, 'ara-fixes'=H4 enforcement, 'rubric-aware'=H4 + rubric leaf checklist.",
+)
+@click.option(
+    "--rubric-path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to PaperBench rubric.json. Required when --prompt-mode=rubric-aware.",
+)
+def main(arxiv_url: str, output_dir: str, timeout: int, gpu: bool, verbose: bool,
+         prompt_mode: str, rubric_path: str | None):
     """Reproduce an ML paper from its arXiv URL.
 
     Takes an arXiv URL and attempts to reproduce the paper's experimental
@@ -60,12 +73,18 @@ def main(arxiv_url: str, output_dir: str, timeout: int, gpu: bool, verbose: bool
     click.echo(f"Timeout: {timeout}s | GPU: {gpu} | Verbose: {verbose}")
     click.echo("-" * 60)
 
+    if prompt_mode == "rubric-aware" and not rubric_path:
+        click.echo("ERROR: --rubric-path is required when --prompt-mode=rubric-aware", err=True)
+        sys.exit(2)
+
     pipeline = ReproductionPipeline(
         arxiv_url=arxiv_url,
         output_dir=output_path,
         timeout=timeout,
         use_gpu=gpu,
         verbose=verbose,
+        prompt_mode=prompt_mode,
+        rubric_path=rubric_path,
     )
 
     try:
