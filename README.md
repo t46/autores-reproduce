@@ -11,6 +11,8 @@ Automated ML paper reproduction pipeline. Takes an arXiv URL and attempts to rep
 
 ## Quick clone & run
 
+`main` 一本に全ての改善 (4 strengthening fixes + ARA-findings validation + Rubric-Aware Stage 2 + paper-cache-dir) がマージ済みです。
+
 ```bash
 # 1. Clone both repos
 git clone https://github.com/t46/autores-reproduce.git
@@ -22,27 +24,35 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # 3. Install
 cd autores-reproduce && uv sync
 
-# 4. Run on a paper (default mode)
+# 4. Run on a paper — default mode (paper text のみ、論文の rubric は見せない)
 uv run reproduce https://arxiv.org/abs/2310.03725 --output-dir ./out --no-gpu
 
-# 5. Or run the pipeline-rethink experiment branch
-git checkout reproduce/pipeline-rethink-2026-04-30
+# 5. ara-fixes mode (H4 enforcement: ALL tasks / EXACT datasets / no simplify)
+uv run reproduce https://arxiv.org/abs/2310.03725 \
+    --prompt-mode ara-fixes \
+    --paper-cache-dir /path/to/paperbench-data/.../stochastic-interpolants \
+    --output-dir ./out --no-gpu
+
+# 6. rubric-aware mode (rubric leaf 要件を Stage 2 prompt に直接注入)
+#    ※ Caveat: spec-disclosure に近い構造、benchmark の絶対値比較は不公正
 uv run reproduce https://arxiv.org/abs/2310.03725 \
     --prompt-mode rubric-aware \
-    --rubric-path /path/to/paperbench-data/.../rubric.json \
+    --rubric-path /path/to/paperbench-data/.../stochastic-interpolants/rubric.json \
     --paper-cache-dir /path/to/paperbench-data/.../stochastic-interpolants \
     --output-dir ./out --no-gpu
 ```
 
 ---
 
-## Branches
+## Branches (履歴)
 
 | branch | 内容 |
 |---|---|
-| `main` | original 5-stage pipeline (1-shot per stage) |
-| `reproduce/strengthen-2026-04-30` | 4 つの局所改善 (metric alias 拡張 / success 厳密化 / pdfplumber / max_tokens 緩和) |
-| `reproduce/pipeline-rethink-2026-04-30` | strengthen + ARA-findings validation (C-008/C-010/H4) + Rubric-Aware Stage 2 mode + paper-cache-dir |
+| `main` | **全部入り** (4 strengthen fixes + ARA fixes + rubric-aware mode + paper-cache-dir) — PR #1 で merge 済 |
+| `reproduce/strengthen-2026-04-30` | 4 つの局所改善のみ (metric alias 拡張 / success 厳密化 / pdfplumber / max_tokens 緩和)。歴史保存用、使う必要なし。 |
+| `reproduce/pipeline-rethink-2026-04-30` | strengthen + ARA-findings (C-008/C-010/H4) + Rubric-Aware Stage 2 + paper-cache-dir。 PR #1 マージ前のスナップショット、main と同内容。 |
+
+新しい人は `main` を clone するだけで OK。 上記 branch は歴史記録のため残してあります。
 
 
 ## How It Works
