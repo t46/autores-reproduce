@@ -30,12 +30,20 @@ class ReproductionPipeline:
         timeout: int = 3600,
         use_gpu: bool = True,
         verbose: bool = False,
+        prompt_mode: str = "default",
+        rubric_path: Path | str | None = None,
+        paper_cache_dir: Path | str | None = None,
     ):
         self.arxiv_url = arxiv_url
         self.output_dir = output_dir.resolve()
         self.timeout = timeout
         self.use_gpu = use_gpu
         self.verbose = verbose
+        # Track A.3 / B.1 (2026-04-30): "default" | "ara-fixes" | "rubric-aware"
+        self.prompt_mode = prompt_mode
+        self.rubric_path = rubric_path
+        # 2026-04-30: bypass arXiv API by reading from a paperbench-data style local cache
+        self.paper_cache_dir = paper_cache_dir
 
         self.stages: list[dict[str, Any]] = []
         self.paper_info: dict[str, Any] = {}
@@ -169,12 +177,16 @@ class ReproductionPipeline:
     def _fetch_paper(self) -> dict[str, Any]:
         """Stage 1: Fetch and parse paper."""
         fetcher = PaperFetcher(self.output_dir / "paper", verbose=self.verbose)
-        return fetcher.fetch(self.arxiv_url)
+        return fetcher.fetch(self.arxiv_url, paper_cache_dir=self.paper_cache_dir)
 
     def _find_code(self) -> dict[str, Any]:
         """Stage 2: Find or generate code."""
         finder = CodeFinder(self.output_dir / "code", verbose=self.verbose)
-        return finder.find(self.paper_info)
+        return finder.find(
+            self.paper_info,
+            rubric_path=self.rubric_path,
+            prompt_mode=self.prompt_mode,
+        )
 
     def _build_env(self) -> dict[str, Any]:
         """Stage 3: Build execution environment."""

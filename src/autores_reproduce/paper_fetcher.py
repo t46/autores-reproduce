@@ -13,6 +13,14 @@ import arxiv
 from anthropic import Anthropic
 from PyPDF2 import PdfReader
 
+# 2026-04-30: pdfplumber を優先 extractor に追加。table 抽出が PyPDF2 より遥かに強い。
+# import 失敗時は PyPDF2 fallback で動くように構造を組む。
+try:
+    import pdfplumber  # type: ignore
+    _HAS_PDFPLUMBER = True
+except ImportError:
+    _HAS_PDFPLUMBER = False
+
 
 class PaperFetcher:
     """Fetches and parses ML papers from arXiv."""
@@ -22,11 +30,15 @@ class PaperFetcher:
         self.verbose = verbose
         self.client = Anthropic()
 
-    def fetch(self, arxiv_url: str) -> dict[str, Any]:
+    def fetch(self, arxiv_url: str, paper_cache_dir: Path | str | None = None) -> dict[str, Any]:
         """Fetch paper metadata, PDF, and extract key information.
 
         Args:
             arxiv_url: URL to the arXiv paper (abs or pdf link).
+            paper_cache_dir: Optional path to a paperbench-data style directory containing
+                paper.pdf + paper.md (+ optional config.yaml). When provided, arXiv fetch is
+                bypassed and metadata + PDF text are read locally. This avoids 429 rate limits
+                during batch experiments. Added 2026-04-30 for pipeline-rethink batch.
 
         Returns:
             Dict with paper metadata, extracted claims, and analysis.
@@ -43,34 +55,42 @@ class PaperFetcher:
 
         self._log(f"Fetching paper with arXiv ID: {arxiv_id}")
 
-        # Fetch metadata via arXiv API
-        try:
-            metadata = self._fetch_metadata(arxiv_id)
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to fetch arXiv metadata: {e}",
-            }
+        if paper_cache_dir is not None:
+            # Cached path: read locally, no arXiv API call
+            try:
+                metadata, pdf_path, paper_text = self._fetch_from_cache(arxiv_id, Path(paper_cache_dir))
+                self._log(f"Loaded paper from cache: {paper_cache_dir}")
+            except Exception as e:
+                return {"success": False, "error": f"Failed to load cached paper: {e}"}
+        else:
+            # Fetch metadata via arXiv API
+            try:
+                metadata = self._fetch_metadata(arxiv_id)
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to fetch arXiv metadata: {e}",
+                }
 
-        # Download PDF
-        try:
-            pdf_path = self._download_pdf(metadata)
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to download PDF: {e}",
-                **metadata,
-            }
+            # Download PDF
+            try:
+                pdf_path = self._download_pdf(metadata)
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to download PDF: {e}",
+                    **metadata,
+                }
 
-        # Extract text from PDF
-        try:
-            paper_text = self._extract_pdf_text(pdf_path)
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to extract PDF text: {e}",
-                **metadata,
-            }
+            # Extract text from PDF
+            try:
+                paper_text = self._extract_pdf_text(pdf_path)
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to extract PDF text: {e}",
+                    **metadata,
+                }
 
         # Use Claude to analyze the paper
         try:
@@ -88,8 +108,53 @@ class PaperFetcher:
             **metadata,
             **analysis,
             "pdf_path": str(pdf_path),
-            "paper_text": paper_text[:50000],  # Truncate for report size
+            # 2026-04-30: 50000 -> 200000 に拡張。Claude Sonnet 4 の context は十分。
+            "paper_text": paper_text[:200000],
         }
+
+    def _fetch_from_cache(self, arxiv_id: str, cache_dir: Path) -> tuple[dict, Path, str]:
+        """Load paper.{pdf,md} from a paperbench-data style cache directory.
+
+        Returns (metadata, pdf_path, paper_text) tuple. Bypasses arXiv API + download.
+        """
+        if not cache_dir.is_dir():
+            raise FileNotFoundError(f"cache_dir not found: {cache_dir}")
+        pdf_src = cache_dir / "paper.pdf"
+        md_src = cache_dir / "paper.md"
+        if not pdf_src.exists():
+            raise FileNotFoundError(f"paper.pdf missing in {cache_dir}")
+        # Copy PDF into output_dir so downstream paths look the same as the online flow
+        pdf_dest = self.output_dir / "paper.pdf"
+        pdf_dest.write_bytes(pdf_src.read_bytes())
+
+        # Title / abstract: prefer paper.md (first non-empty line as title, optional Abstract section)
+        title = arxiv_id
+        abstract = ""
+        if md_src.exists():
+            md_text = md_src.read_text(errors="replace")
+            for line in md_text.splitlines():
+                line = line.strip()
+                if line:
+                    # Strip leading "# " markdown
+                    title = line.lstrip("#").strip() or arxiv_id
+                    break
+            # Best-effort abstract extraction
+            m = re.search(r"(?:^|\n)#+\s*Abstract\s*\n+([^\n#]+(?:\n[^\n#]+)*)", md_text, re.IGNORECASE)
+            if m:
+                abstract = m.group(1).strip()[:2000]
+
+        metadata = {
+            "arxiv_id": arxiv_id,
+            "title": title,
+            "abstract": abstract,
+            "authors": [],
+            "published": "",
+            "pdf_url": str(pdf_src),
+        }
+
+        # Use the existing pdfplumber-based extractor on the cached PDF
+        paper_text = self._extract_pdf_text(pdf_dest)
+        return metadata, pdf_dest, paper_text
 
     def _extract_arxiv_id(self, url: str) -> str | None:
         """Extract arXiv ID from various URL formats.
@@ -148,14 +213,72 @@ class PaperFetcher:
         return pdf_path
 
     def _extract_pdf_text(self, pdf_path: Path) -> str:
-        """Extract text content from PDF."""
+        """Extract text content from PDF.
+
+        2026-04-30: pdfplumber 優先。pdfplumber は table 抽出が強く、
+        論文 Table 1 / Table 2 の数値（FID 1.13 等）を markdown 化して
+        取り出せる。失敗時は PyPDF2 にフォールバック。
+        """
+        if _HAS_PDFPLUMBER:
+            try:
+                return self._extract_with_pdfplumber(pdf_path)
+            except Exception as e:
+                self._log(f"pdfplumber 抽出失敗、PyPDF2 にフォールバック: {e}")
+        return self._extract_with_pypdf2(pdf_path)
+
+    def _extract_with_pdfplumber(self, pdf_path: Path) -> str:
+        """Extract using pdfplumber, including table extraction as markdown."""
+        text_parts: list[str] = []
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                # 1) Plain text
+                page_text = page.extract_text() or ""
+                if page_text:
+                    text_parts.append(page_text)
+                # 2) Tables — markdown 化して text に追加
+                try:
+                    tables = page.extract_tables() or []
+                except Exception:
+                    tables = []
+                for tbl_idx, tbl in enumerate(tables, 1):
+                    if not tbl or not any(any(cell for cell in row if cell) for row in tbl):
+                        continue
+                    md = self._table_to_markdown(tbl)
+                    if md:
+                        text_parts.append(
+                            f"\n[Table extracted from page {page_num} (table {tbl_idx})]\n{md}\n"
+                        )
+        return "\n".join(text_parts)
+
+    def _extract_with_pypdf2(self, pdf_path: Path) -> str:
+        """Fallback: PyPDF2 のみ（table 抽出は不可）。"""
         reader = PdfReader(str(pdf_path))
-        text_parts = []
+        text_parts: list[str] = []
         for page in reader.pages:
             text = page.extract_text()
             if text:
                 text_parts.append(text)
         return "\n".join(text_parts)
+
+    @staticmethod
+    def _table_to_markdown(table: list[list[str | None]]) -> str:
+        """Convert a 2D table (list of rows) to a markdown table string."""
+        if not table:
+            return ""
+        # Normalize: replace None with empty, strip
+        rows = [[(cell or "").strip().replace("\n", " ") for cell in row] for row in table]
+        # Drop fully empty rows
+        rows = [r for r in rows if any(c for c in r)]
+        if not rows:
+            return ""
+        # Use widest row as column count
+        ncol = max(len(r) for r in rows)
+        rows = [r + [""] * (ncol - len(r)) for r in rows]
+        # Build markdown
+        header = "| " + " | ".join(rows[0]) + " |"
+        sep = "| " + " | ".join(["---"] * ncol) + " |"
+        body = ["| " + " | ".join(r) + " |" for r in rows[1:]]
+        return "\n".join([header, sep] + body)
 
     def _analyze_paper(self, paper_text: str, metadata: dict) -> dict[str, Any]:
         """Use Claude to extract key experimental information from the paper.
@@ -168,7 +291,8 @@ class PaperFetcher:
             - Reported metrics
         """
         # Truncate paper text to fit context
-        truncated_text = paper_text[:80000]
+        # 2026-04-30: 80000 -> 160000 に拡張（Claude Sonnet 4 の context window で十分扱える）
+        truncated_text = paper_text[:160000]
 
         prompt = f"""Analyze this ML paper and extract the following information in a structured format.
 

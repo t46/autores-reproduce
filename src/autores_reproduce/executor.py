@@ -107,8 +107,39 @@ class Executor:
             else:
                 error_summary = None
 
+            # 2026-04-30: success_strict — multi-signal で「実は失敗」を検出
+            # returncode=0 でも以下のいずれかなら strict failure:
+            #   - silent failure pattern が stderr/stdout に出ている
+            #   - metric が 1 個も抽出できなかった (実行は終わったが何も測れていない)
+            silent_fail_patterns = [
+                "RuntimeError",
+                "mat1 and mat2",
+                "shape mismatch",
+                "size mismatch",
+                "dimension mismatch",
+                "Traceback (most recent call last)",
+                # 注: 大文字小文字を区別する。"NaN" "nan" は単なる loss 値表示の可能性があるので除外
+            ]
+            combined_output = (result.stderr or "") + "\n" + (result.stdout or "")
+            silent_failure_hits = [p for p in silent_fail_patterns if p in combined_output]
+            success_strict = (
+                success
+                and len(metrics) > 0
+                and not silent_failure_hits
+            )
+            success_strict_reason = None
+            if success and not success_strict:
+                if not metrics:
+                    success_strict_reason = "returncode=0 だが metric が 1 個も抽出できなかった"
+                elif silent_failure_hits:
+                    success_strict_reason = (
+                        f"returncode=0 だが silent failure pattern を検出: {silent_failure_hits[:3]}"
+                    )
+
             return {
                 "success": success,
+                "success_strict": success_strict,
+                "success_strict_reason": success_strict_reason,
                 "message": f"Execution {'completed' if success else 'failed'} in {duration:.1f}s",
                 "returncode": result.returncode,
                 "duration": round(duration, 2),
@@ -238,31 +269,91 @@ class Executor:
 
         metrics = {}
 
-        # Common metric patterns
+        # Common metric patterns (expanded 2026-04-30)
+        # Number pattern includes scientific notation and negatives
+        N = r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
+        kv_sep = r"\s*[:=]\s*"
         patterns = [
-            (r"(?:test|eval|val)?\s*(?:accuracy|acc)\s*[:=]\s*([\d.]+)%?", "accuracy"),
-            (r"(?:test|eval|val)?\s*(?:loss)\s*[:=]\s*([\d.]+)", "loss"),
-            (r"(?:f1|f1.score)\s*[:=]\s*([\d.]+)", "f1"),
-            (r"(?:precision)\s*[:=]\s*([\d.]+)", "precision"),
-            (r"(?:recall)\s*[:=]\s*([\d.]+)", "recall"),
-            (r"(?:bleu)\s*[:=]\s*([\d.]+)", "bleu"),
-            (r"(?:rouge.?1?)\s*[:=]\s*([\d.]+)", "rouge"),
-            (r"(?:perplexity|ppl)\s*[:=]\s*([\d.]+)", "perplexity"),
-            (r"(?:mse|mean.squared.error)\s*[:=]\s*([\d.]+)", "mse"),
-            (r"(?:mae|mean.absolute.error)\s*[:=]\s*([\d.]+)", "mae"),
-            (r"(?:auc|auroc)\s*[:=]\s*([\d.]+)", "auc"),
-            (r"(?:map|mAP)\s*[:=]\s*([\d.]+)", "map"),
-            (r"epoch\s*[:=]?\s*(\d+)", "epochs_completed"),
+            # Classification / regression
+            (rf"(?:test|eval|val)?\s*(?:accuracy|acc){kv_sep}{N}%?", "accuracy"),
+            (rf"(?:test|eval|val)?\s*(?:loss){kv_sep}{N}", "loss"),
+            (rf"(?:f1|f1[._-]score|macro[._-]f1|micro[._-]f1){kv_sep}{N}", "f1"),
+            (rf"(?:precision){kv_sep}{N}", "precision"),
+            (rf"(?:recall){kv_sep}{N}", "recall"),
+            (rf"(?:perplexity|ppl){kv_sep}{N}", "perplexity"),
+            (rf"(?:mse|mean[._-]squared[._-]error){kv_sep}{N}", "mse"),
+            (rf"(?:mae|mean[._-]absolute[._-]error){kv_sep}{N}", "mae"),
+            (rf"(?:auc|auroc|auc[._-]roc){kv_sep}{N}", "auc"),
+            (rf"(?:mean[._-]average[._-]precision|\bmap\b){kv_sep}{N}", "map"),
+            # NLP generation
+            (rf"(?:bleu(?:[._-]?\d)?|bleu[._-]score){kv_sep}{N}", "bleu"),
+            (rf"(?:rouge[._-]?[12l]?|rouge[._-]?score){kv_sep}{N}", "rouge"),
+            (rf"(?:meteor){kv_sep}{N}", "meteor"),
+            (rf"(?:cider(?:[._-]?d)?){kv_sep}{N}", "cider"),
+            (rf"(?:spice){kv_sep}{N}", "spice"),
+            (rf"(?:bert[._-]?score){kv_sep}{N}", "bertscore"),
+            (rf"(?:chrf(?:\+\+|[._-]?pp)?){kv_sep}{N}", "chrf"),
+            (rf"(?:bleurt){kv_sep}{N}", "bleurt"),
+            (rf"(?:comet[._-]?score|\bcomet\b){kv_sep}{N}", "comet"),
+            (rf"(?:sari){kv_sep}{N}", "sari"),
+            (rf"(?:mauve){kv_sep}{N}", "mauve"),
+            # Speech / sequence
+            (rf"(?:wer|word[._-]error[._-]rate){kv_sep}{N}", "wer"),
+            (rf"(?:cer|character[._-]error[._-]rate){kv_sep}{N}", "cer"),
+            # QA / reading
+            (rf"(?:exact[._-]?match|\bem\b){kv_sep}{N}", "em"),
+            # Code
+            (rf"(?:pass\s*@?\s*1|pass[._-]?1){kv_sep}{N}", "pass@1"),
+            (rf"(?:pass\s*@?\s*(?:k|10|100)){kv_sep}{N}", "pass@k"),
+            # Image generation / quality
+            (rf"(?:fid[._-]?50k?){kv_sep}{N}", "fid-50k"),
+            (rf"(?:fid[._-]?score|frechet[._-]inception[._-]distance|\bfid\b){kv_sep}{N}", "fid"),
+            (rf"(?:lpips){kv_sep}{N}", "lpips"),
+            (rf"(?:ssim){kv_sep}{N}", "ssim"),
+            (rf"(?:psnr){kv_sep}{N}", "psnr"),
+            (rf"(?:inception[._-]?score|\bis[._-]?score\b){kv_sep}{N}", "is_score"),
+            (rf"(?:kid[._-]?score|kernel[._-]inception[._-]distance|\bkid\b){kv_sep}{N}", "kid"),
+            (rf"(?:clip[._-]?score){kv_sep}{N}", "clip_score"),
+            # Density / generative
+            (rf"(?:negative[._-]log[._-]likelihood|\bnll\b){kv_sep}{N}", "nll"),
+            (rf"(?:elbo|evidence[._-]lower[._-]bound){kv_sep}{N}", "elbo"),
+            (rf"(?:kl[._-]?divergence|\bkl\b|\bkld\b){kv_sep}{N}", "kl"),
+            # Segmentation / detection
+            (rf"(?:mean[._-]?iou|miou|\biou\b|intersection[._-]over[._-]union){kv_sep}{N}", "iou"),
+            (rf"(?:dice[._-]?(?:score|coefficient)?){kv_sep}{N}", "dice"),
+            # Top-k
+            (rf"(?:top[._-]?1(?:[._-]?acc(?:uracy)?)?){kv_sep}{N}", "top1"),
+            (rf"(?:top[._-]?5(?:[._-]?acc(?:uracy)?)?){kv_sep}{N}", "top5"),
+            # Retrieval / ranking
+            (rf"(?:mean[._-]reciprocal[._-]rank|\bmrr\b){kv_sep}{N}", "mrr"),
+            (rf"(?:ndcg(?:@\d+)?){kv_sep}{N}", "ndcg"),
+            (rf"(?:hits@\d+|recall@\d+|precision@\d+){kv_sep}{N}", "hits@k"),
+            # Bookkeeping
+            (rf"epoch{kv_sep}?{N}", "epochs_completed"),
         ]
 
         for pattern, metric_name in patterns:
-            matches = re.findall(pattern, output, re.IGNORECASE)
+            matches = re.findall(pattern, output, re.IGNORECASE | re.MULTILINE)
             if matches:
-                # Take the last occurrence (final result)
                 try:
                     metrics[metric_name] = float(matches[-1])
-                except ValueError:
+                except (ValueError, TypeError):
                     pass
+
+        # Additionally: parse markdown-style tables (`| FID | 1.13 |`)
+        table_row = re.compile(
+            rf"\|\s*([A-Za-z][\w@\-/.]*)\s*\|\s*{N}\s*\|",
+            re.IGNORECASE,
+        )
+        for m in table_row.finditer(output):
+            metric_name_raw = m.group(1).strip().lower().replace(" ", "")
+            try:
+                value = float(m.group(2))
+            except (ValueError, TypeError):
+                continue
+            # Only keep if not already extracted by a more specific pattern
+            if metric_name_raw and metric_name_raw not in metrics:
+                metrics[metric_name_raw] = value
 
         return metrics
 

@@ -151,30 +151,78 @@ class Verifier:
         # Direct match in metrics dict
         metric_name_lower = metric_name.lower().strip()
 
-        # Common aliases
+        # Common aliases (expanded 2026-04-30 — vision/NLP/code metrics added)
         aliases = {
-            "accuracy": ["accuracy", "acc", "test_accuracy", "eval_accuracy"],
-            "loss": ["loss", "test_loss", "eval_loss", "val_loss"],
-            "f1": ["f1", "f1_score", "f1-score"],
+            # Classification / regression
+            "accuracy": ["accuracy", "acc", "test_accuracy", "eval_accuracy", "val_accuracy", "top1_accuracy"],
+            "loss": ["loss", "test_loss", "eval_loss", "val_loss", "training_loss"],
+            "f1": ["f1", "f1_score", "f1-score", "macro_f1", "micro_f1"],
             "precision": ["precision", "prec"],
             "recall": ["recall", "rec"],
-            "bleu": ["bleu", "bleu_score"],
-            "rouge": ["rouge", "rouge1", "rouge-1"],
             "perplexity": ["perplexity", "ppl"],
             "mse": ["mse", "mean_squared_error"],
             "mae": ["mae", "mean_absolute_error"],
-            "auc": ["auc", "auroc", "auc-roc"],
-            "map": ["map", "mAP", "mean_average_precision"],
+            "auc": ["auc", "auroc", "auc-roc", "auc_roc"],
+            "map": ["map", "mean_average_precision"],
+            # NLP generation
+            "bleu": ["bleu", "bleu_score", "bleu-1", "bleu-2", "bleu-3", "bleu-4"],
+            "rouge": ["rouge", "rouge1", "rouge-1", "rouge2", "rouge-2", "rougel", "rouge-l", "rouge_l"],
+            "meteor": ["meteor", "meteor_score"],
+            "cider": ["cider", "cider-d", "cider_d"],
+            "spice": ["spice"],
+            "bertscore": ["bertscore", "bert_score", "bert-score"],
+            "chrf": ["chrf", "chrf++", "chrf_pp"],
+            "ter": ["ter"],
+            "gleu": ["gleu"],
+            "comet": ["comet", "comet_score"],
+            "bleurt": ["bleurt"],
+            "sari": ["sari"],
+            "mauve": ["mauve"],
+            # Speech / sequence
+            "wer": ["wer", "word_error_rate"],
+            "cer": ["cer", "character_error_rate"],
+            # Reading comprehension / QA
+            "em": ["em", "exact_match", "exact-match"],
+            # Code generation
+            "pass@1": ["pass@1", "pass_1", "pass-1"],
+            "pass@k": ["pass@k", "pass@10", "pass@100", "pass_k"],
+            # Image generation / quality
+            "fid": ["fid", "fid_score", "frechet_inception_distance"],
+            "fid-50k": ["fid-50k", "fid_50k", "fid50k", "fid-50000", "fid_50000"],
+            "lpips": ["lpips", "lpips_score"],
+            "ssim": ["ssim", "ssim_score"],
+            "psnr": ["psnr", "psnr_score"],
+            "is_score": ["is", "is_score", "inception_score"],
+            "kid": ["kid", "kid_score", "kernel_inception_distance"],
+            "clip_score": ["clip_score", "clip-score", "clipscore"],
+            # Density / generative
+            "nll": ["nll", "negative_log_likelihood", "neg_log_likelihood"],
+            "elbo": ["elbo", "evidence_lower_bound"],
+            "kl": ["kl", "kl_divergence", "kld"],
+            # Segmentation / detection
+            "iou": ["iou", "miou", "mean_iou", "intersection_over_union"],
+            "dice": ["dice", "dice_score", "dice_coefficient"],
+            # Top-k
+            "top1": ["top1", "top-1", "top_1", "top1_acc", "top-1-accuracy"],
+            "top5": ["top5", "top-5", "top_5", "top5_acc", "top-5-accuracy"],
+            # Retrieval / ranking
+            "mrr": ["mrr", "mean_reciprocal_rank"],
+            "ndcg": ["ndcg", "ndcg@10", "ndcg@k"],
+            "hits@k": ["hits@k", "hits@1", "hits@10", "recall@k", "recall@1", "recall@10"],
+            "precision@k": ["precision@k", "precision@1", "precision@10", "p@k"],
         }
 
-        # Find which alias group the metric belongs to
+        # Find which alias group the metric belongs to (expanded matching)
         matching_keys = [metric_name_lower]
+        # Normalize the input metric: replace spaces / hyphens / underscores
+        normalized = re.sub(r"[\s\-_]+", "", metric_name_lower)
         for group_name, group_aliases in aliases.items():
-            if metric_name_lower in group_aliases or metric_name_lower == group_name:
+            group_normalized = [re.sub(r"[\s\-_]+", "", a.lower()) for a in group_aliases + [group_name]]
+            if normalized in group_normalized or metric_name_lower in group_aliases or metric_name_lower == group_name:
                 matching_keys = group_aliases + [group_name]
                 break
 
-        # Search in metrics dict
+        # Search in metrics dict (with substring match as last resort)
         for key in matching_keys:
             if key in metrics:
                 return float(metrics[key])
@@ -182,11 +230,29 @@ class Verifier:
             for m_key, m_val in metrics.items():
                 if m_key.lower() == key.lower():
                     return float(m_val)
+            # Substring match (case-insensitive, normalized)
+            key_norm = re.sub(r"[\s\-_]+", "", key.lower())
+            for m_key, m_val in metrics.items():
+                m_norm = re.sub(r"[\s\-_]+", "", m_key.lower())
+                if key_norm == m_norm or (len(key_norm) >= 3 and key_norm in m_norm):
+                    try:
+                        return float(m_val)
+                    except (TypeError, ValueError):
+                        continue
 
-        # Search in stdout as fallback
+        # Search in stdout as fallback (also handle table-style lines)
         for key in matching_keys:
-            pattern = rf"(?:{re.escape(key)})\s*[:=]\s*([\d.]+)"
-            match = re.search(pattern, stdout, re.IGNORECASE)
+            # Standard "key: value" or "key = value"
+            pattern = rf"(?:^|\W)(?:{re.escape(key)})\s*[:=]\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
+            match = re.search(pattern, stdout, re.IGNORECASE | re.MULTILINE)
+            if match:
+                try:
+                    return float(match.group(1))
+                except ValueError:
+                    continue
+            # Table-style "| FID | 1.13 |"
+            pattern_table = rf"\|\s*{re.escape(key)}\s*\|\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\|"
+            match = re.search(pattern_table, stdout, re.IGNORECASE | re.MULTILINE)
             if match:
                 try:
                     return float(match.group(1))
@@ -198,8 +264,13 @@ class Verifier:
     def _calculate_score(self, claims: list[dict[str, Any]]) -> float:
         """Calculate overall reproduction score.
 
-        Score = (verified + 0.5 * untested) / total
-        Untested claims get partial credit since they weren't disproven.
+        Score = (verified + 0.25 * untested) / total
+
+        2026-04-30: untested の重みを 0.5 -> 0.25 に下げた。
+        理由: 「拾えてない」(metric 抽出失敗) に過剰な partial credit を
+        与えるとスコアの天井が上がってしまい、本当に動いているか分からない。
+        verified=1.0 / failed=0.0 / untested=0.25 の方が「拾えてない＝低い」
+        ことが正しく可視化される。
         """
         if not claims:
             return 0.0
@@ -211,8 +282,7 @@ class Verifier:
         if total == 0:
             return 0.0
 
-        # Verified claims count full, untested count half, failed count zero
-        score = (verified + 0.5 * untested) / total
+        score = (verified + 0.25 * untested) / total
         return round(score, 4)
 
     def _claude_verification(
