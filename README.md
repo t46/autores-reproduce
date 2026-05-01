@@ -2,6 +2,49 @@
 
 Automated ML paper reproduction pipeline. Takes an arXiv URL and attempts to reproduce the paper's experimental results end-to-end.
 
+**📊 Live results**: <https://t46.github.io/autores-showcase/reproduce-deep-dive.html>
+(Pipeline-Level Rethink experiment: 5 papers × 4 modes = 20 evaluations)
+
+**🔗 Companion repo**: [t46/autores-showcase](https://github.com/t46/autores-showcase) — UI / 結果ビジュアライゼーション
+
+---
+
+## Quick clone & run
+
+```bash
+# 1. Clone both repos
+git clone https://github.com/t46/autores-reproduce.git
+git clone https://github.com/t46/autores-showcase.git
+
+# 2. Set Anthropic API key
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 3. Install
+cd autores-reproduce && uv sync
+
+# 4. Run on a paper (default mode)
+uv run reproduce https://arxiv.org/abs/2310.03725 --output-dir ./out --no-gpu
+
+# 5. Or run the pipeline-rethink experiment branch
+git checkout reproduce/pipeline-rethink-2026-04-30
+uv run reproduce https://arxiv.org/abs/2310.03725 \
+    --prompt-mode rubric-aware \
+    --rubric-path /path/to/paperbench-data/.../rubric.json \
+    --paper-cache-dir /path/to/paperbench-data/.../stochastic-interpolants \
+    --output-dir ./out --no-gpu
+```
+
+---
+
+## Branches
+
+| branch | 内容 |
+|---|---|
+| `main` | original 5-stage pipeline (1-shot per stage) |
+| `reproduce/strengthen-2026-04-30` | 4 つの局所改善 (metric alias 拡張 / success 厳密化 / pdfplumber / max_tokens 緩和) |
+| `reproduce/pipeline-rethink-2026-04-30` | strengthen + ARA-findings validation (C-008/C-010/H4) + Rubric-Aware Stage 2 mode + paper-cache-dir |
+
+
 ## How It Works
 
 ```
@@ -61,6 +104,44 @@ uv run reproduce https://arxiv.org/abs/2301.12345 \
 | `--timeout` / `-t` | `3600` | Max execution time in seconds |
 | `--gpu` / `--no-gpu` | `--gpu` | Whether to use GPU if available |
 | `--verbose` / `-v` | off | Detailed stage-by-stage logging |
+| `--prompt-mode` | `default` | `default` / `ara-fixes` (H4 enforcement) / `rubric-aware` (rubric leaf checklist 注入) — pipeline-rethink branch のみ |
+| `--rubric-path` | none | PaperBench `rubric.json` のパス。`--prompt-mode=rubric-aware` のとき必須 |
+| `--paper-cache-dir` | none | paperbench-data 形式の dir (paper.pdf + paper.md)。指定すると arXiv API を bypass (429 回避) |
+
+### Pipeline-Level Rethink experiment (pipeline-rethink branch)
+
+```bash
+# baseline (default prompt, repo lookup あり)
+uv run reproduce https://arxiv.org/abs/2310.03725 --no-gpu
+
+# ara-fixes mode (H4 enforcement, repo lookup skip — generation 直行)
+uv run reproduce https://arxiv.org/abs/2310.03725 \
+    --prompt-mode ara-fixes \
+    --paper-cache-dir /path/to/paperbench-data/.../stochastic-interpolants \
+    --no-gpu
+
+# rubric-aware mode (rubric leaf 要件を Stage 2 prompt に直接注入)
+uv run reproduce https://arxiv.org/abs/2310.03725 \
+    --prompt-mode rubric-aware \
+    --rubric-path /path/to/paperbench-data/.../stochastic-interpolants/rubric.json \
+    --paper-cache-dir /path/to/paperbench-data/.../stochastic-interpolants \
+    --no-gpu
+```
+
+**※ Caveat**: `rubric-aware` は judge が見る要件を agent に直接見せる構造で、benchmark 評価としては test-disclosure に近い。詳細は [showcase §6.5](https://t46.github.io/autores-showcase/reproduce-deep-dive.html#rethink-residue) 参照。
+
+### Batch evaluation (PaperBench 5 papers × 4 modes)
+
+```bash
+# 5 論文 × {baseline, improved, ara-fixes, rubric-aware} = 20 evaluations
+uv run python scripts/batch_paperbench.py \
+    --variants baseline improved ara-fixes rubric-aware \
+    --paper-fetch-interval 5
+
+# 結果は results/paperbench-batch/<paper>/<variant>/{summary.json, evaluation.json}
+```
+
+**前提**: `paperbench-data` を別途 clone しておく必要あり (PaperBench 公式 repo: <https://github.com/openai/preparedness/tree/main/project/paperbench>)。 `batch_paperbench.py` 内 `PAPERBENCH_DATA` 定数を自分の path に書き換える。
 
 ## Output
 
